@@ -1,0 +1,104 @@
+╔══════════════════════════════════════════════════════════════════════╗
+║           🏈 MADDEN FRANCHISE BOT - QUICK START                      ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+📋 SETUP CHECKLIST
+──────────────────────────────────────────────────────────────────────
+
+□ 1. Install dependencies
+     → pip install -r requirements.txt
+
+□ 2. Create .env file
+     → Copy .env.example to .env
+     → Add your DISCORD_BOT_TOKEN (REQUIRED)
+     → Add other credentials (optional)
+
+□ 3. Generate invite link
+     → python generate_invite.py
+     → Open URL in browser
+     → Select your server
+
+□ 4. Create "League Admin" role in Discord
+     → Assign to commissioners
+
+□ 5. Run the bot
+     → python bot.py
+     → Should see "Synced X command(s)"
+
+□ 6. Test in Discord
+     → Type /help to see commands
+     → Try /register_team
+
+
+🔑 YOUR API KEYS
+──────────────────────────────────────────────────────────────────────
+
+Bot Token:        YOUR_BOT_TOKEN_HERE
+Application ID:   YOUR_APPLICATION_ID_HERE
+Client Secret:    YOUR_CLIENT_SECRET_HERE
+Public Key:       YOUR_PUBLIC_KEY_HERE
+
+⚠️  Only Bot Token is required for basic functionality!
+
+
+🎮 ESSENTIAL COMMANDS
+──────────────────────────────────────────────────────────────────────
+
+PLAYERS:
+  /register_team team_name:Cowboys abbreviation:DAL
+  /my_team
+  /teams
+  /standings
+  /recent_games
+
+ADMINS (requires "League Admin" role):
+  /report_game winner:@User1 loser:@User2 winner_score:28 loser_score:21
+  /advance_week
+  /league_info
+  /set_season season:2
+
+
+📁 PROJECT FILES
+──────────────────────────────────────────────────────────────────────
+
+bot.py              → Main bot code
+requirements.txt    → Python dependencies
+.env                → Your secret credentials (DO NOT SHARE!)
+.env.example        → Template for .env
+generate_invite.py  → Creates bot invite URL
+README.md           → Full documentation
+SETUP_GUIDE.md      → Detailed setup instructions
+data/               → Stores teams, standings, schedule (auto-created)
+
+
+🔧 TROUBLESHOOTING
+──────────────────────────────────────────────────────────────────────
+
+Bot won't start:
+  → Check DISCORD_BOT_TOKEN in .env
+  → Run: pip install -r requirements.txt
+
+Commands don't show:
+  → Wait 5 minutes after first start
+  → Try typing /help
+  → Restart bot
+
+Permission errors:
+  → Check bot has "Send Messages" permission
+  → Check bot has "Use Slash Commands" permission
+  → Verify bot role is above other roles
+
+
+📞 NEXT STEPS
+──────────────────────────────────────────────────────────────────────
+
+1. Customize league name in data/config.json
+2. Have players register teams with /register_team
+3. Start reporting games with /report_game
+4. Track standings with /standings
+5. Advance weeks with /advance_week
+
+
+═══════════════════════════════════════════════════════════════════════
+Ready to go! Run: python bot.py
+═══════════════════════════════════════════════════════════════════════
