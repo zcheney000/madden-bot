@@ -1,8 +1,8 @@
 # Environment variables
 .env
 
-# Data files
-data/
+# Data files (commented out to include initial data)
+# data/
 
 # Python
 __pycache__/
