@@ -6,6 +6,7 @@ import os
 from datetime import datetime
 from typing import Optional
 from dotenv import load_dotenv
+import database as db
 
 # Load environment variables
 load_dotenv()
@@ -68,6 +69,37 @@ def save_json(filepath, data):
     with open(filepath, 'w') as f:
         json.dump(data, f, indent=4)
 
+# Hybrid helper functions (use database if available, otherwise JSON)
+async def get_teams_data():
+    """Get teams data from database or JSON"""
+    if db.pool:
+        return await db.get_all_teams()
+    return load_json(TEAMS_FILE)
+
+async def get_standings_data():
+    """Get standings data from database or JSON"""
+    if db.pool:
+        return await db.get_all_standings()
+    return load_json(STANDINGS_FILE)
+
+async def get_config_data():
+    """Get config data from database or JSON"""
+    if db.pool:
+        return await db.get_config()
+    return load_json(CONFIG_FILE)
+
+async def get_games_data():
+    """Get games data from database or JSON"""
+    if db.pool:
+        return await db.get_all_games()
+    return load_json(GAMES_FILE)
+
+async def get_head_to_head_data():
+    """Get head-to-head data from database or JSON"""
+    if db.pool:
+        return await db.get_all_head_to_head()
+    return load_json(HEAD_TO_HEAD_FILE)
+
 # Initialize data files
 def init_data_files():
     """Initialize data files if they don't exist"""
@@ -92,7 +124,14 @@ def init_data_files():
 @bot.event
 async def on_ready():
     """Bot startup event"""
-    init_data_files()
+    # Initialize database
+    db_connected = await db.init_db()
+    if db_connected:
+        print('✅ Using Supabase database')
+    else:
+        print('⚠️  Using JSON files (DATABASE_URL not set)')
+        init_data_files()
+    
     print(f'{bot.user} has connected to Discord!')
     print(f'Bot is in {len(bot.guilds)} guild(s)')
     
@@ -181,7 +220,7 @@ async def on_member_join(member):
 def is_admin():
     """Check if user has admin role"""
     async def predicate(interaction: discord.Interaction):
-        config = load_json(CONFIG_FILE)
+        config = await get_config_data()
         admin_role_name = config.get('admin_role', 'League Admin')
         return any(role.name == admin_role_name for role in interaction.user.roles)
     return app_commands.check(predicate)
@@ -193,7 +232,7 @@ async def update_teams_list(guild):
     if not teams_channel:
         return
     
-    teams = load_json(TEAMS_FILE)
+    teams = await get_teams_data()
     
     # Create the teams list embed
     embed = discord.Embed(
@@ -259,7 +298,7 @@ async def update_teams_list(guild):
 )
 async def register_team(interaction: discord.Interaction, team_name: str, abbreviation: str):
     """Register a team for the league"""
-    teams = load_json(TEAMS_FILE)
+    teams = await get_teams_data()
     user_id = str(interaction.user.id)
     
     # Check if user already has a team
@@ -279,23 +318,34 @@ async def register_team(interaction: discord.Interaction, team_name: str, abbrev
         return
     
     # Register the team
-    teams[user_id] = {
-        "name": team_name,
-        "abbreviation": abbreviation.upper(),
-        "owner": interaction.user.name,
-        "owner_id": user_id
-    }
-    save_json(TEAMS_FILE, teams)
-    
-    # Initialize standings
-    standings = load_json(STANDINGS_FILE)
-    standings[user_id] = {
-        "wins": 0,
-        "losses": 0,
-        "points_for": 0,
-        "points_against": 0
-    }
-    save_json(STANDINGS_FILE, standings)
+    if db.pool:
+        # Use database
+        success = await db.create_team(user_id, team_name, abbreviation.upper())
+        if not success:
+            await interaction.response.send_message(
+                "❌ Failed to register team. Please try again.",
+                ephemeral=True
+            )
+            return
+    else:
+        # Use JSON files
+        teams[user_id] = {
+            "name": team_name,
+            "abbreviation": abbreviation.upper(),
+            "owner": interaction.user.name,
+            "owner_id": user_id
+        }
+        save_json(TEAMS_FILE, teams)
+        
+        # Initialize standings
+        standings = load_json(STANDINGS_FILE)
+        standings[user_id] = {
+            "wins": 0,
+            "losses": 0,
+            "points_for": 0,
+            "points_against": 0
+        }
+        save_json(STANDINGS_FILE, standings)
     
     embed = discord.Embed(
         title="🏈 Team Registered!",
@@ -318,8 +368,8 @@ async def register_team(interaction: discord.Interaction, team_name: str, abbrev
 )
 async def reassign_team(interaction: discord.Interaction, current_owner: discord.Member, new_owner: discord.Member):
     """Reassign a team from one user to another"""
-    teams = load_json(TEAMS_FILE)
-    standings = load_json(STANDINGS_FILE)
+    teams = await get_teams_data()
+    standings = await get_standings_data()
     
     current_user_id = str(current_owner.id)
     new_user_id = str(new_owner.id)
@@ -346,24 +396,40 @@ async def reassign_team(interaction: discord.Interaction, current_owner: discord
     team_abbr = team_info['abbreviation']
     
     # Transfer team to new owner
-    teams[new_user_id] = {
-        "name": team_name,
-        "abbreviation": team_abbr,
-        "owner": new_owner.name,
-        "owner_id": new_user_id
-    }
-    
-    # Remove from old owner
-    del teams[current_user_id]
-    
-    # Transfer standings if they exist
-    if current_user_id in standings:
-        standings[new_user_id] = standings[current_user_id]
-        del standings[current_user_id]
-    
-    # Save changes
-    save_json(TEAMS_FILE, teams)
-    save_json(STANDINGS_FILE, standings)
+    if db.pool:
+        # Use database
+        await db.delete_team(current_user_id)
+        await db.create_team(new_user_id, team_name, team_abbr)
+        # Transfer standings
+        if current_user_id in standings:
+            old_record = standings[current_user_id]
+            await db.update_standing(
+                new_user_id,
+                old_record['wins'],
+                old_record['losses'],
+                old_record['points_for'],
+                old_record['points_against']
+            )
+    else:
+        # Use JSON files
+        teams[new_user_id] = {
+            "name": team_name,
+            "abbreviation": team_abbr,
+            "owner": new_owner.name,
+            "owner_id": new_user_id
+        }
+        
+        # Remove from old owner
+        del teams[current_user_id]
+        
+        # Transfer standings if they exist
+        if current_user_id in standings:
+            standings[new_user_id] = standings[current_user_id]
+            del standings[current_user_id]
+        
+        # Save changes
+        save_json(TEAMS_FILE, teams)
+        save_json(STANDINGS_FILE, standings)
     
     # Send confirmation
     embed = discord.Embed(
@@ -384,8 +450,8 @@ async def reassign_team(interaction: discord.Interaction, current_owner: discord
 @app_commands.describe(user="The team owner to remove (mention them)")
 async def remove_team(interaction: discord.Interaction, user: discord.Member):
     """Remove a team from the league"""
-    teams = load_json(TEAMS_FILE)
-    standings = load_json(STANDINGS_FILE)
+    teams = await get_teams_data()
+    standings = await get_standings_data()
     
     user_id = str(user.id)
     
@@ -403,15 +469,20 @@ async def remove_team(interaction: discord.Interaction, user: discord.Member):
     team_abbr = team_info['abbreviation']
     
     # Remove team
-    del teams[user_id]
-    
-    # Remove standings if they exist
-    if user_id in standings:
-        del standings[user_id]
-    
-    # Save changes
-    save_json(TEAMS_FILE, teams)
-    save_json(STANDINGS_FILE, standings)
+    if db.pool:
+        # Use database (standings will cascade delete)
+        await db.delete_team(user_id)
+    else:
+        # Use JSON files
+        del teams[user_id]
+        
+        # Remove standings if they exist
+        if user_id in standings:
+            del standings[user_id]
+        
+        # Save changes
+        save_json(TEAMS_FILE, teams)
+        save_json(STANDINGS_FILE, standings)
     
     # Send confirmation
     embed = discord.Embed(
@@ -436,8 +507,8 @@ async def remove_team(interaction: discord.Interaction, user: discord.Member):
 )
 async def assign_team(interaction: discord.Interaction, user: discord.Member, team_name: str, abbreviation: str):
     """Admin command to assign a team to any user"""
-    teams = load_json(TEAMS_FILE)
-    standings = load_json(STANDINGS_FILE)
+    teams = await get_teams_data()
+    standings = await get_standings_data()
     
     user_id = str(user.id)
     
@@ -468,22 +539,33 @@ async def assign_team(interaction: discord.Interaction, user: discord.Member, te
             return
     
     # Register the team
-    teams[user_id] = {
-        "name": team_name,
-        "abbreviation": abbreviation.upper(),
-        "owner": user.name,
-        "owner_id": user_id
-    }
-    save_json(TEAMS_FILE, teams)
-    
-    # Initialize standings
-    standings[user_id] = {
-        "wins": 0,
-        "losses": 0,
-        "points_for": 0,
-        "points_against": 0
-    }
-    save_json(STANDINGS_FILE, standings)
+    if db.pool:
+        # Use database
+        success = await db.create_team(user_id, team_name, abbreviation.upper())
+        if not success:
+            await interaction.response.send_message(
+                "❌ Failed to assign team. Please try again.",
+                ephemeral=True
+            )
+            return
+    else:
+        # Use JSON files
+        teams[user_id] = {
+            "name": team_name,
+            "abbreviation": abbreviation.upper(),
+            "owner": user.name,
+            "owner_id": user_id
+        }
+        save_json(TEAMS_FILE, teams)
+        
+        # Initialize standings
+        standings[user_id] = {
+            "wins": 0,
+            "losses": 0,
+            "points_for": 0,
+            "points_against": 0
+        }
+        save_json(STANDINGS_FILE, standings)
     
     embed = discord.Embed(
         title="🏈 Team Assigned!",
@@ -502,7 +584,7 @@ async def assign_team(interaction: discord.Interaction, user: discord.Member, te
 @bot.tree.command(name="teams", description="View all registered teams")
 async def teams(interaction: discord.Interaction):
     """Display all registered teams"""
-    teams = load_json(TEAMS_FILE)
+    teams = await get_teams_data()
     
     if not teams:
         await interaction.response.send_message("❌ No teams registered yet!", ephemeral=True)
@@ -528,8 +610,8 @@ async def teams(interaction: discord.Interaction):
 @bot.tree.command(name="my_team", description="View your team information")
 async def my_team(interaction: discord.Interaction):
     """Display user's team information"""
-    teams = load_json(TEAMS_FILE)
-    standings = load_json(STANDINGS_FILE)
+    teams = await get_teams_data()
+    standings = await get_standings_data()
     user_id = str(interaction.user.id)
     
     if user_id not in teams:
@@ -561,8 +643,8 @@ async def my_team(interaction: discord.Interaction):
 @bot.tree.command(name="standings", description="View league standings")
 async def standings(interaction: discord.Interaction):
     """Display league standings"""
-    teams = load_json(TEAMS_FILE)
-    standings = load_json(STANDINGS_FILE)
+    teams = await get_teams_data()
+    standings = await get_standings_data()
     
     if not teams:
         await interaction.response.send_message("❌ No teams registered yet!", ephemeral=True)
@@ -622,8 +704,9 @@ async def report_game(
     loser_score: int
 ):
     """Report a game result"""
-    teams = load_json(TEAMS_FILE)
-    standings = load_json(STANDINGS_FILE)
+    teams = await get_teams_data()
+    standings = await get_standings_data()
+    config = await get_config_data()
     
     winner_id = str(winner.id)
     loser_id = str(loser.id)
@@ -633,30 +716,66 @@ async def report_game(
         return
     
     # Update standings
-    standings[winner_id]['wins'] += 1
-    standings[winner_id]['points_for'] += winner_score
-    standings[winner_id]['points_against'] += loser_score
-    
-    standings[loser_id]['losses'] += 1
-    standings[loser_id]['points_for'] += loser_score
-    standings[loser_id]['points_against'] += winner_score
-    
-    save_json(STANDINGS_FILE, standings)
-    
-    # Add to schedule/results
-    schedule = load_json(SCHEDULE_FILE)
-    config = load_json(CONFIG_FILE)
-    
-    game_result = {
-        "week": config.get('week', 1),
-        "winner": teams[winner_id]['name'],
-        "loser": teams[loser_id]['name'],
-        "winner_score": winner_score,
-        "loser_score": loser_score,
-        "date": datetime.now().isoformat()
-    }
-    schedule['games'].append(game_result)
-    save_json(SCHEDULE_FILE, schedule)
+    if db.pool:
+        # Use database
+        winner_record = standings[winner_id]
+        loser_record = standings[loser_id]
+        
+        await db.update_standing(
+            winner_id,
+            winner_record['wins'] + 1,
+            winner_record['losses'],
+            winner_record['points_for'] + winner_score,
+            winner_record['points_against'] + loser_score
+        )
+        
+        await db.update_standing(
+            loser_id,
+            loser_record['wins'],
+            loser_record['losses'] + 1,
+            loser_record['points_for'] + loser_score,
+            loser_record['points_against'] + winner_score
+        )
+        
+        # Record game
+        await db.create_game(
+            config.get('week', 1),
+            winner_id,
+            loser_id,
+            teams[winner_id]['name'],
+            teams[winner_id]['abbreviation'],
+            teams[loser_id]['name'],
+            teams[loser_id]['abbreviation'],
+            winner_score,
+            loser_score
+        )
+        
+        # Update head-to-head
+        await db.update_head_to_head(winner_id, loser_id)
+    else:
+        # Use JSON files
+        standings[winner_id]['wins'] += 1
+        standings[winner_id]['points_for'] += winner_score
+        standings[winner_id]['points_against'] += loser_score
+        
+        standings[loser_id]['losses'] += 1
+        standings[loser_id]['points_for'] += loser_score
+        standings[loser_id]['points_against'] += winner_score
+        
+        save_json(STANDINGS_FILE, standings)
+        
+        # Add to schedule/results
+        schedule = load_json(SCHEDULE_FILE)
+        game_result = {
+            "week": config.get('week', 1),
+            "winner": teams[winner_id]['name'],
+            "loser": teams[loser_id]['name'],
+            "winner_score": winner_score,
+            "loser_score": loser_score,
+            "date": datetime.now().isoformat()
+        }
+        schedule['games'].append(game_result)
+        save_json(SCHEDULE_FILE, schedule)
     
     embed = discord.Embed(
         title="🏈 Game Result",
@@ -672,23 +791,27 @@ async def report_game(
 @app_commands.describe(count="Number of recent games to show (default: 5)")
 async def recent_games(interaction: discord.Interaction, count: Optional[int] = 5):
     """Display recent game results"""
-    schedule = load_json(SCHEDULE_FILE)
-    games = schedule.get('games', [])
+    if db.pool:
+        games = await db.get_recent_games(count)
+    else:
+        schedule = load_json(SCHEDULE_FILE)
+        games = schedule.get('games', [])[-count:]
+        games.reverse()
     
     if not games:
         await interaction.response.send_message("❌ No games have been played yet!", ephemeral=True)
         return
-    
-    recent = games[-count:]
-    recent.reverse()
     
     embed = discord.Embed(
         title="📊 Recent Games",
         color=discord.Color.blue()
     )
     
-    for game in recent:
-        result = f"**{game['winner']}** {game['winner_score']} - {game['loser_score']} **{game['loser']}**"
+    for game in games:
+        # Handle both database and JSON formats
+        winner_name = game.get('winner_team') or game.get('winner')
+        loser_name = game.get('loser_team') or game.get('loser')
+        result = f"**{winner_name}** {game['winner_score']} - {game['loser_score']} **{loser_name}**"
         embed.add_field(
             name=f"Week {game['week']}",
             value=result,
@@ -706,10 +829,8 @@ async def recent_games(interaction: discord.Interaction, count: Optional[int] = 
 )
 async def report_my_game(interaction: discord.Interaction, week: int, my_score: int, opponent_abbr: str, opponent_score: int):
     """User reports their own game result"""
-    teams = load_json(TEAMS_FILE)
-    standings = load_json(STANDINGS_FILE)
-    games = load_json(GAMES_FILE)
-    head_to_head = load_json(HEAD_TO_HEAD_FILE)
+    teams = await get_teams_data()
+    standings = await get_standings_data()
     
     user_id = str(interaction.user.id)
     
@@ -769,38 +890,78 @@ async def report_my_game(interaction: discord.Interaction, week: int, my_score: 
         return
     
     # Update standings
-    standings[winner_id]['wins'] += 1
-    standings[winner_id]['points_for'] += winner_score
-    standings[winner_id]['points_against'] += loser_score
-    
-    standings[loser_id]['losses'] += 1
-    standings[loser_id]['points_for'] += loser_score
-    standings[loser_id]['points_against'] += winner_score
-    
-    save_json(STANDINGS_FILE, standings)
-    
-    # Record game
-    game_record = {
-        "week": week,
-        "winner_id": winner_id,
-        "loser_id": loser_id,
-        "winner_team": teams[winner_id]['name'],
-        "winner_abbr": teams[winner_id]['abbreviation'],
-        "loser_team": teams[loser_id]['name'],
-        "loser_abbr": teams[loser_id]['abbreviation'],
-        "winner_score": winner_score,
-        "loser_score": loser_score,
-        "date": datetime.utcnow().isoformat()
-    }
-    games.append(game_record)
-    save_json(GAMES_FILE, games)
-    
-    # Update head-to-head record
-    h2h_key = f"{winner_id}_{loser_id}"
-    if h2h_key not in head_to_head:
-        head_to_head[h2h_key] = {"wins": 0}
-    head_to_head[h2h_key]["wins"] += 1
-    save_json(HEAD_TO_HEAD_FILE, head_to_head)
+    if db.pool:
+        # Use database
+        winner_record = standings[winner_id]
+        loser_record = standings[loser_id]
+        
+        await db.update_standing(
+            winner_id,
+            winner_record['wins'] + 1,
+            winner_record['losses'],
+            winner_record['points_for'] + winner_score,
+            winner_record['points_against'] + loser_score
+        )
+        
+        await db.update_standing(
+            loser_id,
+            loser_record['wins'],
+            loser_record['losses'] + 1,
+            loser_record['points_for'] + loser_score,
+            loser_record['points_against'] + winner_score
+        )
+        
+        # Record game
+        await db.create_game(
+            week,
+            winner_id,
+            loser_id,
+            teams[winner_id]['name'],
+            teams[winner_id]['abbreviation'],
+            teams[loser_id]['name'],
+            teams[loser_id]['abbreviation'],
+            winner_score,
+            loser_score
+        )
+        
+        # Update head-to-head
+        await db.update_head_to_head(winner_id, loser_id)
+    else:
+        # Use JSON files
+        standings[winner_id]['wins'] += 1
+        standings[winner_id]['points_for'] += winner_score
+        standings[winner_id]['points_against'] += loser_score
+        
+        standings[loser_id]['losses'] += 1
+        standings[loser_id]['points_for'] += loser_score
+        standings[loser_id]['points_against'] += winner_score
+        
+        save_json(STANDINGS_FILE, standings)
+        
+        # Record game
+        games = load_json(GAMES_FILE)
+        game_record = {
+            "week": week,
+            "winner_id": winner_id,
+            "loser_id": loser_id,
+            "winner_team": teams[winner_id]['name'],
+            "winner_abbr": teams[winner_id]['abbreviation'],
+            "loser_team": teams[loser_id]['name'],
+            "loser_abbr": teams[loser_id]['abbreviation'],
+            "winner_score": winner_score,
+            "loser_score": loser_score,
+            "date": datetime.utcnow().isoformat()
+        }
+        games.append(game_record)
+        save_json(GAMES_FILE, games)
+        
+        # Update head-to-head record
+        head_to_head = load_json(HEAD_TO_HEAD_FILE)
+        h2h_key = f"{winner_id}_{loser_id}"
+        if h2h_key not in head_to_head:
+            head_to_head[h2h_key] = {"wins": 0}
+        head_to_head[h2h_key]["wins"] += 1
+        save_json(HEAD_TO_HEAD_FILE, head_to_head)
     
     # Send confirmation
     embed = discord.Embed(
@@ -865,9 +1026,9 @@ def calculate_power_rankings(teams_data, standings_data, head_to_head_data):
 @bot.tree.command(name="power_rankings", description="View power rankings with tiebreakers")
 async def power_rankings(interaction: discord.Interaction):
     """Display power rankings"""
-    teams = load_json(TEAMS_FILE)
-    standings = load_json(STANDINGS_FILE)
-    head_to_head = load_json(HEAD_TO_HEAD_FILE)
+    teams = await get_teams_data()
+    standings = await get_standings_data()
+    head_to_head = await get_head_to_head_data()
     
     if not teams:
         await interaction.response.send_message("❌ No teams registered yet!", ephemeral=True)
@@ -915,9 +1076,9 @@ async def update_power_rankings_channel(guild):
     if not channel:
         return
     
-    teams = load_json(TEAMS_FILE)
-    standings = load_json(STANDINGS_FILE)
-    head_to_head = load_json(HEAD_TO_HEAD_FILE)
+    teams = await get_teams_data()
+    standings = await get_standings_data()
+    head_to_head = await get_head_to_head_data()
     
     if not teams:
         return
@@ -993,9 +1154,14 @@ async def post_power_rankings(interaction: discord.Interaction):
 @is_admin()
 async def advance_week(interaction: discord.Interaction):
     """Advance the league to the next week"""
-    config = load_json(CONFIG_FILE)
-    config['week'] = config.get('week', 1) + 1
-    save_json(CONFIG_FILE, config)
+    config = await get_config_data()
+    new_week = config.get('week', 1) + 1
+    
+    if db.pool:
+        await db.set_config('week', str(new_week))
+    else:
+        config['week'] = new_week
+        save_json(CONFIG_FILE, config)
     
     embed = discord.Embed(
         title="📅 Week Advanced",
@@ -1010,9 +1176,12 @@ async def advance_week(interaction: discord.Interaction):
 @app_commands.describe(season="Season number")
 async def set_season(interaction: discord.Interaction, season: int):
     """Set the current season"""
-    config = load_json(CONFIG_FILE)
-    config['season'] = season
-    save_json(CONFIG_FILE, config)
+    if db.pool:
+        await db.set_config('season', str(season))
+    else:
+        config = load_json(CONFIG_FILE)
+        config['season'] = season
+        save_json(CONFIG_FILE, config)
     
     await interaction.response.send_message(f"✅ Season set to **{season}**", ephemeral=True)
 
@@ -1172,8 +1341,8 @@ async def announce_sim(interaction: discord.Interaction, sim_type: str, week: Op
 @bot.tree.command(name="league_info", description="View league information")
 async def league_info(interaction: discord.Interaction):
     """Display league information"""
-    config = load_json(CONFIG_FILE)
-    teams = load_json(TEAMS_FILE)
+    config = await get_config_data()
+    teams = await get_teams_data()
     schedule = load_json(SCHEDULE_FILE)
     
     embed = discord.Embed(
@@ -1470,7 +1639,7 @@ async def create_team_channel(
     channel_name: Optional[str] = None
 ):
     """Create a private channel for a specific team"""
-    teams = load_json(TEAMS_FILE)
+    teams = await get_teams_data()
     user_id = str(team_owner.id)
     
     if user_id not in teams:
@@ -1569,7 +1738,7 @@ async def create_all_team_channels(interaction: discord.Interaction):
     """Create private channels for all registered teams"""
     await interaction.response.defer()
     
-    teams = load_json(TEAMS_FILE)
+    teams = await get_teams_data()
     
     if not teams:
         await interaction.followup.send("❌ No teams registered yet!", ephemeral=True)
@@ -1666,7 +1835,7 @@ async def create_all_team_channels(interaction: discord.Interaction):
 )
 async def create_matchup(interaction: discord.Interaction, team1_abbr: str, team2_abbr: str, week: int):
     """Create a private matchup channel for two teams to schedule their game"""
-    teams = load_json(TEAMS_FILE)
+    teams = await get_teams_data()
     
     # Find teams by abbreviation
     team1_id = None
@@ -1887,7 +2056,7 @@ async def archive_matchups(interaction: discord.Interaction, week: int):
 @is_admin()
 async def update_teams_roster(interaction: discord.Interaction):
     """Update or create the pinned teams roster in #team-owners channel"""
-    teams = load_json(TEAMS_FILE)
+    teams = await get_teams_data()
     
     # Find #team-owners channel
     teams_channel = discord.utils.get(interaction.guild.text_channels, name="team-owners")
@@ -2005,7 +2174,7 @@ async def post_welcome(interaction: discord.Interaction):
 @bot.tree.command(name="available_teams", description="View all available NFL teams")
 async def available_teams(interaction: discord.Interaction):
     """Display all available NFL teams"""
-    teams = load_json(TEAMS_FILE)
+    teams = await get_teams_data()
     
     # Get list of taken team names and abbreviations
     taken_teams = set()
