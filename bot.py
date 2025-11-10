@@ -445,6 +445,62 @@ async def reassign_team(interaction: discord.Interaction, current_owner: discord
     # Update the teams roster
     await update_teams_list(interaction.guild)
 
+@bot.tree.command(name="remove_team_by_abbr", description="Remove a team by abbreviation (Admin only)")
+@is_admin()
+@app_commands.describe(abbreviation="Team abbreviation (e.g., KC, BUF)")
+async def remove_team_by_abbr(interaction: discord.Interaction, abbreviation: str):
+    """Remove a team from the league by abbreviation"""
+    teams = await get_teams_data()
+    
+    # Find team by abbreviation
+    team_user_id = None
+    abbr_upper = abbreviation.upper()
+    
+    for user_id, team in teams.items():
+        if team['abbreviation'].upper() == abbr_upper:
+            team_user_id = user_id
+            break
+    
+    if not team_user_id:
+        await interaction.response.send_message(
+            f"❌ No team found with abbreviation **{abbr_upper}**!",
+            ephemeral=True
+        )
+        return
+    
+    # Get team info before removing
+    team_info = teams[team_user_id]
+    team_name = team_info['name']
+    team_abbr = team_info['abbreviation']
+    
+    # Remove team
+    if db.pool:
+        await db.delete_team(team_user_id)
+    else:
+        del teams[team_user_id]
+        standings = await get_standings_data()
+        if team_user_id in standings:
+            del standings[team_user_id]
+        save_json(TEAMS_FILE, teams)
+        save_json(STANDINGS_FILE, standings)
+    
+    # Send confirmation
+    member = interaction.guild.get_member(int(team_user_id))
+    owner_display = member.mention if member else f"User ID: {team_user_id}"
+    
+    embed = discord.Embed(
+        title="🗑️ Team Removed!",
+        description=f"**{team_name}** ({team_abbr}) has been removed from the league.",
+        color=discord.Color.red()
+    )
+    embed.add_field(name="Previous Owner", value=owner_display, inline=True)
+    embed.set_footer(text=f"Total Teams: {len(teams) - 1}")
+    
+    await interaction.response.send_message(embed=embed)
+    
+    # Update the teams roster
+    await update_teams_list(interaction.guild)
+
 @bot.tree.command(name="remove_team", description="Remove a team from the league (Admin only)")
 @is_admin()
 @app_commands.describe(user="The team owner to remove (mention them)")
@@ -584,28 +640,34 @@ async def assign_team(interaction: discord.Interaction, user: discord.Member, te
 @bot.tree.command(name="teams", description="View all registered teams")
 async def teams_command(interaction: discord.Interaction):
     """Display all registered teams"""
-    teams_data = await get_teams_data()
-    
-    if not teams_data:
-        await interaction.response.send_message("❌ No teams registered yet!", ephemeral=True)
-        return
-    
-    embed = discord.Embed(
-        title="🏈 Registered Teams",
-        color=discord.Color.blue()
-    )
-    
-    for user_id, team in teams_data.items():
-        member = interaction.guild.get_member(int(user_id))
-        owner_mention = member.mention if member else team['owner']
-        embed.add_field(
-            name=f"{team['abbreviation']} - {team['name']}",
-            value=f"Owner: {owner_mention}",
-            inline=False
+    try:
+        teams_data = await get_teams_data()
+        
+        if not teams_data:
+            await interaction.response.send_message("❌ No teams registered yet!", ephemeral=True)
+            return
+        
+        embed = discord.Embed(
+            title="🏈 Registered Teams",
+            color=discord.Color.blue()
         )
-    
-    embed.set_footer(text=f"Total Teams: {len(teams_data)}")
-    await interaction.response.send_message(embed=embed)
+        
+        for user_id, team in teams_data.items():
+            member = interaction.guild.get_member(int(user_id))
+            owner_mention = member.mention if member else team.get('owner', 'Unknown')
+            embed.add_field(
+                name=f"{team['abbreviation']} - {team['name']}",
+                value=f"Owner: {owner_mention}",
+                inline=False
+            )
+        
+        embed.set_footer(text=f"Total Teams: {len(teams_data)}")
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        print(f"Error in teams command: {e}")
+        import traceback
+        traceback.print_exc()
+        await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
 
 @bot.tree.command(name="my_team", description="View your team information")
 async def my_team(interaction: discord.Interaction):
