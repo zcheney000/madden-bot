@@ -582,11 +582,11 @@ async def assign_team(interaction: discord.Interaction, user: discord.Member, te
     await update_teams_list(interaction.guild)
 
 @bot.tree.command(name="teams", description="View all registered teams")
-async def teams(interaction: discord.Interaction):
+async def teams_command(interaction: discord.Interaction):
     """Display all registered teams"""
-    teams = await get_teams_data()
+    teams_data = await get_teams_data()
     
-    if not teams:
+    if not teams_data:
         await interaction.response.send_message("❌ No teams registered yet!", ephemeral=True)
         return
     
@@ -595,7 +595,7 @@ async def teams(interaction: discord.Interaction):
         color=discord.Color.blue()
     )
     
-    for user_id, team in teams.items():
+    for user_id, team in teams_data.items():
         member = interaction.guild.get_member(int(user_id))
         owner_mention = member.mention if member else team['owner']
         embed.add_field(
@@ -604,7 +604,7 @@ async def teams(interaction: discord.Interaction):
             inline=False
         )
     
-    embed.set_footer(text=f"Total Teams: {len(teams)}")
+    embed.set_footer(text=f"Total Teams: {len(teams_data)}")
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="my_team", description="View your team information")
