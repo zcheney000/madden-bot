@@ -1069,6 +1069,12 @@ def calculate_power_rankings(teams_data, standings_data, head_to_head_data):
             continue
         
         record = standings_data[user_id]
+        
+        # Skip teams that have never played (0-0 with no points)
+        if (record['wins'] == 0 and record['losses'] == 0 and 
+            record['points_for'] == 0 and record['points_against'] == 0):
+            continue
+        
         rankings.append({
             'user_id': user_id,
             'team_name': team['name'],
