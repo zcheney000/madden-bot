@@ -766,88 +766,97 @@ async def report_game(
     loser_score: int
 ):
     """Report a game result"""
-    teams = await get_teams_data()
-    standings = await get_standings_data()
-    config = await get_config_data()
+    # Defer response to prevent timeout
+    await interaction.response.defer()
     
-    winner_id = str(winner.id)
-    loser_id = str(loser.id)
-    
-    if winner_id not in teams or loser_id not in teams:
-        await interaction.response.send_message("❌ One or both users don't have registered teams!", ephemeral=True)
-        return
-    
-    # Update standings
-    if db.pool:
-        # Use database
-        winner_record = standings[winner_id]
-        loser_record = standings[loser_id]
+    try:
+        teams = await get_teams_data()
+        standings = await get_standings_data()
+        config = await get_config_data()
         
-        await db.update_standing(
-            winner_id,
-            winner_record['wins'] + 1,
-            winner_record['losses'],
-            winner_record['points_for'] + winner_score,
-            winner_record['points_against'] + loser_score
+        winner_id = str(winner.id)
+        loser_id = str(loser.id)
+        
+        if winner_id not in teams or loser_id not in teams:
+            await interaction.followup.send("❌ One or both users don't have registered teams!", ephemeral=True)
+            return
+        
+        # Update standings
+        if db.pool:
+            # Use database
+            winner_record = standings[winner_id]
+            loser_record = standings[loser_id]
+            
+            await db.update_standing(
+                winner_id,
+                winner_record['wins'] + 1,
+                winner_record['losses'],
+                winner_record['points_for'] + winner_score,
+                winner_record['points_against'] + loser_score
+            )
+            
+            await db.update_standing(
+                loser_id,
+                loser_record['wins'],
+                loser_record['losses'] + 1,
+                loser_record['points_for'] + loser_score,
+                loser_record['points_against'] + winner_score
+            )
+            
+            # Record game
+            await db.create_game(
+                config.get('week', 1),
+                winner_id,
+                loser_id,
+                teams[winner_id]['name'],
+                teams[winner_id]['abbreviation'],
+                teams[loser_id]['name'],
+                teams[loser_id]['abbreviation'],
+                winner_score,
+                loser_score
+            )
+            
+            # Update head-to-head
+            await db.update_head_to_head(winner_id, loser_id)
+        else:
+            # Use JSON files
+            standings[winner_id]['wins'] += 1
+            standings[winner_id]['points_for'] += winner_score
+            standings[winner_id]['points_against'] += loser_score
+            
+            standings[loser_id]['losses'] += 1
+            standings[loser_id]['points_for'] += loser_score
+            standings[loser_id]['points_against'] += winner_score
+            
+            save_json(STANDINGS_FILE, standings)
+            
+            # Add to schedule/results
+            schedule = load_json(SCHEDULE_FILE)
+            game_result = {
+                "week": config.get('week', 1),
+                "winner": teams[winner_id]['name'],
+                "loser": teams[loser_id]['name'],
+                "winner_score": winner_score,
+                "loser_score": loser_score,
+                "date": datetime.now().isoformat()
+            }
+            schedule['games'].append(game_result)
+            save_json(SCHEDULE_FILE, schedule)
+        
+        embed = discord.Embed(
+            title="🏈 Game Result",
+            description=f"**{teams[winner_id]['name']}** defeats **{teams[loser_id]['name']}**",
+            color=discord.Color.green()
         )
+        embed.add_field(name="Final Score", value=f"{winner_score} - {loser_score}", inline=True)
+        embed.add_field(name="Week", value=str(config.get('week', 1)), inline=True)
         
-        await db.update_standing(
-            loser_id,
-            loser_record['wins'],
-            loser_record['losses'] + 1,
-            loser_record['points_for'] + loser_score,
-            loser_record['points_against'] + winner_score
-        )
-        
-        # Record game
-        await db.create_game(
-            config.get('week', 1),
-            winner_id,
-            loser_id,
-            teams[winner_id]['name'],
-            teams[winner_id]['abbreviation'],
-            teams[loser_id]['name'],
-            teams[loser_id]['abbreviation'],
-            winner_score,
-            loser_score
-        )
-        
-        # Update head-to-head
-        await db.update_head_to_head(winner_id, loser_id)
-    else:
-        # Use JSON files
-        standings[winner_id]['wins'] += 1
-        standings[winner_id]['points_for'] += winner_score
-        standings[winner_id]['points_against'] += loser_score
-        
-        standings[loser_id]['losses'] += 1
-        standings[loser_id]['points_for'] += loser_score
-        standings[loser_id]['points_against'] += winner_score
-        
-        save_json(STANDINGS_FILE, standings)
-        
-        # Add to schedule/results
-        schedule = load_json(SCHEDULE_FILE)
-        game_result = {
-            "week": config.get('week', 1),
-            "winner": teams[winner_id]['name'],
-            "loser": teams[loser_id]['name'],
-            "winner_score": winner_score,
-            "loser_score": loser_score,
-            "date": datetime.now().isoformat()
-        }
-        schedule['games'].append(game_result)
-        save_json(SCHEDULE_FILE, schedule)
-    
-    embed = discord.Embed(
-        title="🏈 Game Result",
-        description=f"**{teams[winner_id]['name']}** defeats **{teams[loser_id]['name']}**",
-        color=discord.Color.green()
-    )
-    embed.add_field(name="Final Score", value=f"{winner_score} - {loser_score}", inline=True)
-    embed.add_field(name="Week", value=str(config.get('week', 1)), inline=True)
-    
-    await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        print(f"Error in report_game: {e}")
+        import traceback
+        traceback.print_exc()
+        await interaction.followup.send(f"❌ Error reporting game: {str(e)}", ephemeral=True)
 
 @bot.tree.command(name="recent_games", description="View recent game results")
 @app_commands.describe(count="Number of recent games to show (default: 5)")
@@ -891,154 +900,163 @@ async def recent_games(interaction: discord.Interaction, count: Optional[int] = 
 )
 async def report_my_game(interaction: discord.Interaction, week: int, my_score: int, opponent_abbr: str, opponent_score: int):
     """User reports their own game result"""
-    teams = await get_teams_data()
-    standings = await get_standings_data()
+    # Defer response to prevent timeout
+    await interaction.response.defer()
     
-    user_id = str(interaction.user.id)
-    
-    # Check if user has a team
-    if user_id not in teams:
-        await interaction.response.send_message(
-            "❌ You don't have a registered team! Use `/register_team` first.",
-            ephemeral=True
+    try:
+        teams = await get_teams_data()
+        standings = await get_standings_data()
+        
+        user_id = str(interaction.user.id)
+        
+        # Check if user has a team
+        if user_id not in teams:
+            await interaction.followup.send(
+                "❌ You don't have a registered team! Use `/register_team` first.",
+                ephemeral=True
+            )
+            return
+        
+        # Find opponent by abbreviation
+        opponent_id = None
+        opponent_abbr_upper = opponent_abbr.upper()
+        for uid, team in teams.items():
+            if team['abbreviation'].upper() == opponent_abbr_upper:
+                opponent_id = uid
+                break
+        
+        if not opponent_id:
+            await interaction.followup.send(
+                f"❌ No team found with abbreviation **{opponent_abbr_upper}**!",
+                ephemeral=True
+            )
+            return
+        
+        if opponent_id == user_id:
+            await interaction.followup.send(
+                "❌ You can't play against yourself!",
+                ephemeral=True
+            )
+            return
+        
+        my_team = teams[user_id]
+        opp_team = teams[opponent_id]
+        
+        # Determine winner and loser
+        if my_score > opponent_score:
+            winner_id = user_id
+            loser_id = opponent_id
+            winner_score = my_score
+            loser_score = opponent_score
+            result_text = "🎉 **Victory!**"
+            color = discord.Color.green()
+        elif my_score < opponent_score:
+            winner_id = opponent_id
+            loser_id = user_id
+            winner_score = opponent_score
+            loser_score = my_score
+            result_text = "😔 **Defeat**"
+            color = discord.Color.red()
+        else:
+            await interaction.followup.send(
+                "❌ Ties are not allowed! Please enter the correct scores.",
+                ephemeral=True
+            )
+            return
+        
+        # Update standings
+        if db.pool:
+            # Use database
+            winner_record = standings[winner_id]
+            loser_record = standings[loser_id]
+            
+            await db.update_standing(
+                winner_id,
+                winner_record['wins'] + 1,
+                winner_record['losses'],
+                winner_record['points_for'] + winner_score,
+                winner_record['points_against'] + loser_score
+            )
+            
+            await db.update_standing(
+                loser_id,
+                loser_record['wins'],
+                loser_record['losses'] + 1,
+                loser_record['points_for'] + loser_score,
+                loser_record['points_against'] + winner_score
+            )
+            
+            # Record game
+            await db.create_game(
+                week,
+                winner_id,
+                loser_id,
+                teams[winner_id]['name'],
+                teams[winner_id]['abbreviation'],
+                teams[loser_id]['name'],
+                teams[loser_id]['abbreviation'],
+                winner_score,
+                loser_score
+            )
+            
+            # Update head-to-head
+            await db.update_head_to_head(winner_id, loser_id)
+        else:
+            # Use JSON files
+            standings[winner_id]['wins'] += 1
+            standings[winner_id]['points_for'] += winner_score
+            standings[winner_id]['points_against'] += loser_score
+            
+            standings[loser_id]['losses'] += 1
+            standings[loser_id]['points_for'] += loser_score
+            standings[loser_id]['points_against'] += winner_score
+            
+            save_json(STANDINGS_FILE, standings)
+            
+            # Record game
+            games = load_json(GAMES_FILE)
+            game_record = {
+                "week": week,
+                "winner_id": winner_id,
+                "loser_id": loser_id,
+                "winner_team": teams[winner_id]['name'],
+                "winner_abbr": teams[winner_id]['abbreviation'],
+                "loser_team": teams[loser_id]['name'],
+                "loser_abbr": teams[loser_id]['abbreviation'],
+                "winner_score": winner_score,
+                "loser_score": loser_score,
+                "date": datetime.utcnow().isoformat()
+            }
+            games.append(game_record)
+            save_json(GAMES_FILE, games)
+            
+            # Update head-to-head record
+            head_to_head = load_json(HEAD_TO_HEAD_FILE)
+            h2h_key = f"{winner_id}_{loser_id}"
+            if h2h_key not in head_to_head:
+                head_to_head[h2h_key] = {"wins": 0}
+            head_to_head[h2h_key]["wins"] += 1
+            save_json(HEAD_TO_HEAD_FILE, head_to_head)
+        
+        # Send confirmation
+        embed = discord.Embed(
+            title=result_text,
+            description=f"**{my_team['name']}** {my_score} - {opponent_score} **{opp_team['name']}**",
+            color=color
         )
-        return
-    
-    # Find opponent by abbreviation
-    opponent_id = None
-    opponent_abbr_upper = opponent_abbr.upper()
-    for uid, team in teams.items():
-        if team['abbreviation'].upper() == opponent_abbr_upper:
-            opponent_id = uid
-            break
-    
-    if not opponent_id:
-        await interaction.response.send_message(
-            f"❌ No team found with abbreviation **{opponent_abbr_upper}**!",
-            ephemeral=True
-        )
-        return
-    
-    if opponent_id == user_id:
-        await interaction.response.send_message(
-            "❌ You can't play against yourself!",
-            ephemeral=True
-        )
-        return
-    
-    my_team = teams[user_id]
-    opp_team = teams[opponent_id]
-    
-    # Determine winner and loser
-    if my_score > opponent_score:
-        winner_id = user_id
-        loser_id = opponent_id
-        winner_score = my_score
-        loser_score = opponent_score
-        result_text = "🎉 **Victory!**"
-        color = discord.Color.green()
-    elif my_score < opponent_score:
-        winner_id = opponent_id
-        loser_id = user_id
-        winner_score = opponent_score
-        loser_score = my_score
-        result_text = "😔 **Defeat**"
-        color = discord.Color.red()
-    else:
-        await interaction.response.send_message(
-            "❌ Ties are not allowed! Please enter the correct scores.",
-            ephemeral=True
-        )
-        return
-    
-    # Update standings
-    if db.pool:
-        # Use database
-        winner_record = standings[winner_id]
-        loser_record = standings[loser_id]
+        embed.add_field(name="Week", value=str(week), inline=True)
+        embed.add_field(name="Your Record", value=f"{standings[user_id]['wins']}-{standings[user_id]['losses']}", inline=True)
+        embed.set_footer(text="Game recorded! Power rankings updated in #power-rankings")
         
-        await db.update_standing(
-            winner_id,
-            winner_record['wins'] + 1,
-            winner_record['losses'],
-            winner_record['points_for'] + winner_score,
-            winner_record['points_against'] + loser_score
-        )
+        await interaction.followup.send(embed=embed)
         
-        await db.update_standing(
-            loser_id,
-            loser_record['wins'],
-            loser_record['losses'] + 1,
-            loser_record['points_for'] + loser_score,
-            loser_record['points_against'] + winner_score
-        )
-        
-        # Record game
-        await db.create_game(
-            week,
-            winner_id,
-            loser_id,
-            teams[winner_id]['name'],
-            teams[winner_id]['abbreviation'],
-            teams[loser_id]['name'],
-            teams[loser_id]['abbreviation'],
-            winner_score,
-            loser_score
-        )
-        
-        # Update head-to-head
-        await db.update_head_to_head(winner_id, loser_id)
-    else:
-        # Use JSON files
-        standings[winner_id]['wins'] += 1
-        standings[winner_id]['points_for'] += winner_score
-        standings[winner_id]['points_against'] += loser_score
-        
-        standings[loser_id]['losses'] += 1
-        standings[loser_id]['points_for'] += loser_score
-        standings[loser_id]['points_against'] += winner_score
-        
-        save_json(STANDINGS_FILE, standings)
-        
-        # Record game
-        games = load_json(GAMES_FILE)
-        game_record = {
-            "week": week,
-            "winner_id": winner_id,
-            "loser_id": loser_id,
-            "winner_team": teams[winner_id]['name'],
-            "winner_abbr": teams[winner_id]['abbreviation'],
-            "loser_team": teams[loser_id]['name'],
-            "loser_abbr": teams[loser_id]['abbreviation'],
-            "winner_score": winner_score,
-            "loser_score": loser_score,
-            "date": datetime.utcnow().isoformat()
-        }
-        games.append(game_record)
-        save_json(GAMES_FILE, games)
-        
-        # Update head-to-head record
-        head_to_head = load_json(HEAD_TO_HEAD_FILE)
-        h2h_key = f"{winner_id}_{loser_id}"
-        if h2h_key not in head_to_head:
-            head_to_head[h2h_key] = {"wins": 0}
-        head_to_head[h2h_key]["wins"] += 1
-        save_json(HEAD_TO_HEAD_FILE, head_to_head)
-    
-    # Send confirmation
-    embed = discord.Embed(
-        title=result_text,
-        description=f"**{my_team['name']}** {my_score} - {opponent_score} **{opp_team['name']}**",
-        color=color
-    )
-    embed.add_field(name="Week", value=str(week), inline=True)
-    embed.add_field(name="Your Record", value=f"{standings[user_id]['wins']}-{standings[user_id]['losses']}", inline=True)
-    embed.set_footer(text="Game recorded! Power rankings updated in #power-rankings")
-    
-    await interaction.response.send_message(embed=embed)
-    
-    # Auto-update power rankings channel
-    await update_power_rankings_channel(interaction.guild)
+        # Auto-update power rankings channel
+        await update_power_rankings_channel(interaction.guild)
+    except Exception as e:
+        print(f"Error in report_my_game: {e}")
+        import traceback
+        traceback.print_exc()
+        await interaction.followup.send(f"❌ Error reporting game: {str(e)}", ephemeral=True)
 
 # ==================== POWER RANKINGS ====================
 
